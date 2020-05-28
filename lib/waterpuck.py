@@ -1,29 +1,38 @@
+#
+# In the 2020 version of the waterpuck,
 
-
-import network
+import json
 import usocket as socket
 from wifi_connect import do_connect
-from machine import Timer, Pin
+from machine import Pin
+from minute_timer import MinuteTimer
+# See info about const here https://www.youtube.com/watch?v=hHec4qL00x0&t=656s
+from micropython import const
 
 WLAN_PROFILE = 'lib/wifi.dat'
+VALVES_JSON = 'lib/valves.json'
 CONTENT_PREAMBLE = b"HTTP/1.0 200 OK \n\n   "
-WATERING_TIME = 1  # The number of minutes to keep the valve open.
-# KLUDGE - i couldn't get the wemos to callback if the period between callbacks was
-# > 7 minutes.  So Make the WATERING_TIME in increments of 5, with 5 being the lowest
-# amount of time.
+WATERING_MINS = const(1)  # The number of minutes to keep each valve open.
+MIN_WATERING_TIME = const(1)
+MAX_WATERING_TIME = const(30)
 
 
 class WaterPuck:
-    def __init__(self, *tuple_of_gpio_pins_for_valves):
-        self.pins_set_to_valves = tuple_of_gpio_pins_for_valves
-        print('pins: {}'.format(self.pins_set_to_valves))
+    def __init__(self):
+        # Get the pins from the valves file.
+        with open(VALVES_JSON) as f:
+            self.valves_dict = json.load(f)
         # set to a "default" pin.
         self.watering_pin = Pin(0, Pin.OUT)
-        self.tim = Timer(-1)
-        self.num_five_min_callbacks = WATERING_TIME/5
-        self.num_five_min_called_back = 0
-        # self.watering_ms = 5 * 60 * 1000  # Watering increments is in 5 minutes
-        self.watering_ms = 60 * 5 * 100
+        self.valve_key = ""
+        self.watering_mins = WATERING_MINS
+
+        # Initialize the minute timer with the number of watering minutes
+        # for each valve as well as the callback function when the timer
+        # goes off.  The timer starts when the start_timer() method is invoked.
+        self.minute_timer = MinuteTimer(
+            self._turn_off_valve, self.watering_mins)
+        # Get the wifi's password and ssid.
         with open(WLAN_PROFILE) as f:
             line = f.readline()
         self.ssid, self.password = line.strip("\n").split(";")
@@ -33,6 +42,7 @@ class WaterPuck:
     # Listen calls _send_response to let the web client know
     # it received a request.
     #########################################################
+
     def _send_response(self, conn, specific):
         content = CONTENT_PREAMBLE + bytes(specific, 'utf-8')
         conn.sendall(content)
@@ -43,59 +53,63 @@ class WaterPuck:
     #########################################################
 
     def _turn_off_valve(self):
-        self.tim.deinit()
         self.watering_pin.off()
-        self.bStopped_watering = True
-        print('turned off valve on pin {}.'.format(self.watering_pin))
-        self.watering_pin.off()
-    #########################################################
-    # _turn_on_valve_and_wait sets up this callback to happen
-    # after the watering time has completed.  It then turns
-    # the valve off and calls _turn_on_valve_and_wait to start
-    # turn on the next valve.
+        print('turned off valve {} on pin {}.'.format(
+            self.valve_key, self.watering_pin))
+        # Cycle to the next valve.
+        self.valves_dict.pop(self.valve_key)
+
+        self._cycle_through_valves()
+
     #########################################################
 
-    def _watering_callback(self, valve_pin_list):
-        self.num_five_min_called_back += 1
-        print('in callback.  Num times called back: {} num callbacks will happen: {}'.format(
-            self.num_five_min_called_back, self.num_five_min_callbacks))
-        if (self.num_five_min_called_back < self.num_five_min_callbacks):
-            self.tim.init(period=self.watering_ms, mode=Timer.ONE_SHOT,
-                          callback=lambda t: self._watering_callback(valve_pin_list))
-        else:
-            self._turn_off_valve()
-            self._turn_on_valve_and_wait(valve_pin_list)
-    #########################################################
-    # _turn_on_valves calls _turn_on_valve_and_wait to start
-    # the watering from the first valve as well as a timer
-    # with a callback when the watering is done.  When the
-    # callback gets triggered, it calls _turn_on_valve_and_wait
-    # to start up the next valve in the list, or to stop
-    # if the list of valves is empty.
     #########################################################
 
-    def _turn_on_valve_and_wait(self, valve_pin_list):
-        if len(valve_pin_list) != 0:
-            valve_pin = valve_pin_list[0]
-            self.watering_pin = Pin(valve_pin, Pin.OUT)
+    def _cycle_through_valves(self):
+        if len(self.valves_dict) != 0:
+            valve_keys = self.valves_dict.keys()
+            key_iterator = iter(valve_keys)
+            self.valve_key = next(key_iterator)
+            self.watering_pin = Pin(self.valves_dict[self.valve_key], Pin.OUT)
             self.watering_pin.on()
-            print('turned on valve {}'.format(valve_pin_list[0]))
-            valve_pin_list = valve_pin_list[1:]
-            # Not sure why, but if WATERING_TIME is > 7 minutes, the callback doesn't happen.
-            self.tim.init(period=self.watering_ms, mode=Timer.ONE_SHOT,
-                          callback=lambda t: self._watering_callback(valve_pin_list))
+            print('turned on valve pin {}'.format(
+                self.valves_dict[self.valve_key]))
+            self.minute_timer.start_timer()
+
     #########################################################
-    # Listen calls _turn_on_valves when it gets an HTML request
-    # that is tagged with 'water_on'.
-    # This function gets the watering "work flow" started by
-    # sending the list of valve pins to the next method.
+    def _get_input(self, request_str):
+        equal_sign = request_str.find('=')
+        return request_str[equal_sign+1:].split()[0]
     #########################################################
 
-    def _turn_on_valves(self, valve_pins):
-        valve_pin_list = list(valve_pins)
-        # Kludge to get over wemos won't let me set the callback timer above 7 minutes.
-        self.num_five_min_called_back = 0
-        self._turn_on_valve_and_wait(valve_pin_list)
+    def _remove_valve(self, request_str):
+        key = self._get_input(request_str)
+        print('in _is_remove_valve.  Key to remove: {}'.format(key))
+        if key in self.valves_dict.keys():
+            self.valves_dict.pop(key)
+        return key
+    #########################################################
+
+    def _get_valve_str(self):
+        str = ""
+        for k, v in self.valves_dict.items():
+            valve_str = ' the {} valve on pin {}   '.format(k, v)
+            str += valve_str
+        return str
+
+    #########################################################
+
+    def _set_watering_time(self, request_str):
+        x = self._get_input(request_str)
+        try:
+            watering_mins = int(x)
+        except ValueError:
+            return False
+        if watering_mins > MAX_WATERING_TIME or watering_mins < MIN_WATERING_TIME:
+            return False
+        self.watering_mins = watering_mins
+        return True
+
     #########################################################
     # Listen is the main method called after initialization.  This
     # function creates a web server and then listens for the
@@ -103,9 +117,6 @@ class WaterPuck:
     # using Angry IP to figure out what IP address to connect
     # to.
     #
-    # I also have/had plans to change the watering time.  But
-    # at the moment that is not implemented.  Right now the
-    # WATERING_TIME constant is set to 15 (for 15 minutes).
     #########################################################
 
     def listen(self, port):
@@ -124,17 +135,23 @@ class WaterPuck:
             # Figure out if the URL is for controlling valve(s)
             start_watering = request.find('water_on')
             stop_watering = request.find('water_off')
+            valve_off = request.find('valve_off')
             exit_listen = request.find('exit')
             watering_time = request.find('water_time')
             hello_listen = request.find('hello')
+            # The check is a follow up to the request.find()...
             if (hello_listen != -1 and hello_listen < 10):
                 # Command sent to start watering.
-                self._send_response(conn, 'hello')
+                valve_str = self._get_valve_str()
+                min_str = "minute" if self.watering_mins == 1 else "minutes"
+                return_str = 'Hello - the watering time is set to {} {}. \n   Valves: {}.'.format(
+                    self.watering_mins, min_str, valve_str)
+                self._send_response(conn, return_str)
 
             if (start_watering != -1 and start_watering < 10):
                 # Command sent to start watering.
                 self._send_response(conn, 'start watering')
-                self._turn_on_valves(self.pins_set_to_valves)
+                self._cycle_through_valves()
 
             elif (stop_watering != -1 and stop_watering < 10):
 
@@ -142,9 +159,34 @@ class WaterPuck:
                 self._send_response(conn, 'stop watering')
                 # THere's only one valve on at a time.
                 self._turn_off_valve()
+            elif (valve_off != -1 and valve_off < 10):
+                # See if the valve string is in the dictionary of valves.
+                return_str = ""
+                key = self._remove_valve(request[valve_off:])
+                if len(key) != 0:
+                    return_str = "Will not turn the water on for the {} valve ".format(
+                        key)
+                else:
+                    return_str = "Not a valid valve name."
+                valve_str = self._get_valve_str()
+                return_str += '\n   Valves that are on include {}'.format(
+                    valve_str)
+                self._send_response(conn, return_str)
             elif (watering_time != -1 and watering_time < 10):
-                # TODO: Change watering time.
-                self._send_response(conn, 'changing watering time')
+                # The first part of the request has been truncated.  I send
+                # the request string at the location where the string
+                # water_time starts.
+                is_watering_time_set = self._set_watering_time(
+                    request[watering_time:])
+                return_str = ""
+                if (is_watering_time_set):
+                    min_str = "minute" if self.watering_mins == 1 else "minutes"
+                    return_str = "Changing the watering time to {} {}.".format(
+                        self.watering_mins, min_str)
+                else:
+                    return_str = "The watering time must be between {} minutes and {} minutes.   The watering time is still {} minutes.".format(MIN_WATERING_TIME, MAX_WATERING_TIME,
+                                                                                                                                                self.watering_mins)
+                self._send_response(conn, return_str)
             elif (exit_listen != -1 and exit_listen < 10):
                 self._turn_off_valve()
                 conn.close()

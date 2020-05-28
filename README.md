@@ -4,25 +4,61 @@ And what does May bring? Another year of dappling with irrigation.
 
 ## Changes
 
-The biggest change I am making is to replace the wemos D1 with an ESP32. The wemos D1 is unstable and the wireless antenna is not strong.
+The biggest change I am making in the 2020 version is to replace the wemos D1 with an ESP32. The wemos D1 is unstable and the wireless antenna is not strong.
 
 # Experience
+The waterpuck is an ESP32 controlling three relays connected to the 24VAC lines of an Orbit 3-valve watering system.  The other goop converts the 24VAC down to a 5DC so the ESP32 can use the 24VAC power source.
+![water puck](images/waterpuck.png)
+When the waterpuck starts up, it becomes a web server. The code assumes there is a /lib/wifi.dat file that contains the wifi's ssid;password .
+
+The waterpuck listens for any of these requests:
 
 From any client that can send an URL:
-
 ```
 http://<TBD IP address:port>/hello
 http://<TBD IP address:port>/water_on
 http://<TBD IP address:port>/water_off
-http://<TBD IP address:port>/water_time
+http://<TBD IP address:port>/water_time=<number of minutes>
 http://<TBD IP address:port>/exit_listen
 ```
+For example, a web browser sends
+```
+http://<TBD IP address:port>/hello
+```
+The waterpuck sends a message back.
+```
+Hello - the watering time is set to 15 minutes.
+```
+
+
+
+
+# Code Walkthrough
+
+## WaterPuck class
+
+### Initialization
+
+The WaterPuck class takes in a list of gpio pins - one for each of the valves (I currently have an Orbit manifold with three valves in the backyard for example) - and the number of minutes to keep the watering valve open. The default is set by the WATERING_MINS global variable.
+
+```
+from waterpuck import WaterPuck
+puck = WaterPuck([3,4,5], 5)
+```
+
+initializes a WaterPuck representing 3 valves. One valve is connected to GPIO 3, another to GPIO 4, and a third to GPIO 5. Each valve will be turned on for 5 minutes.
+
+The `__init__` method also reads in the wifi's ssid and password from the wifi.dat file that is created when the puck is in wifi AP mode.
+## Start Watering
+`puck.start_watering()` kicks off turning on and off each valve.
 
 # Connect ESP32 to Mac over USB
 
 To talk with the ESP32 from the Mac, Silicon Lab's CP210x USB to UART Bridge VCP Driver needs to be installed. It's been quite awhile since I installed this...so for me at this point it just works.
+
 - Plug in the ESP32 to a USB port.
 - Check to see the /tty/dev is showing up.
+
 ```
 $ ls /dev/tty.*
 /dev/tty.Bluetooth-Incoming-Port        /dev/tty.SLAB_USBtoUART
@@ -40,6 +76,7 @@ The [micropython downloads page](https://micropython.org/download/#esp32) has th
   Note: The port path is unique to the USB port on your mac.
 
 # RSHELL and connect
+
 ```
 $ rshell
 Welcome to rshell. Use Control-D (or the exit command) to exit rshell.
@@ -55,8 +92,11 @@ Setting time ... May 19, 2020 10:40:33
 Evaluating board_name ... pyboard
 Retrieving time epoch ... Jan 01, 2000
 ```
+
 # Check micropython Version
+
 While connected in rshell, go into repl:
+
 ```
 > repl
 Entering REPL. Use Control-X to exit.
@@ -67,21 +107,31 @@ Type "help()" for more information.
 
 # IDE
 
-I'm using VS code.  I use a terminal window to get to an rshell connection.  I went through this earlier.
+I'm using VS code. I use a terminal window to get to an rshell connection. I went through this earlier.
+
 ## rshell commands
-Type `help` to see the rshell commands.  Type
-`help <command>` to get details on one of the commands.  As an example, to get the list of files:
+
+Type `help` to see the rshell commands. Type
+`help <command>` to get details on one of the commands. As an example, to get the list of files:
+
 ```
 >ls /pyboard
 lib/
 ```
+
 shows this board has a lib folder and nothing else in the root.
+
 # GPIO Pins
+
 GPIO pins are used to open/close the valves through the relay.
+
 ## ESP32 DevKit C Pinout
+
 ![devkit c pinout](https://simba-os.readthedocs.io/en/latest/_images/esp32-devkitc-pinout.png)
+
 # Back Yard
-GPIO pins 12, 14, and 27 (see pinout above) work "well" to use for opening/closing each relay switch.  I'll also use the GND pin next to pin 12.
+
+GPIO pins 12, 14, and 27 (see pinout above) work "well" to use for opening/closing each relay switch. I'll also use the GND pin next to pin 12.
 
 # Minimizing Code Size
 
